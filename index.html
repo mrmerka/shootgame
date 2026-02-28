@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>SHOOT ONLINE v1.1</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Courier New', monospace; user-select: none; }
+        #ui { position: absolute; inset: 0; padding: 20px; pointer-events: none; color: white; display: flex; flex-direction: column; justify-content: space-between; z-index: 10; }
+        .panel { background: rgba(0,0,0,0.85); padding: 10px; border: 1px solid #444; }
+        #v-err { position: fixed; inset: 0; background: #900; display: none; text-align: center; padding-top: 15%; z-index: 1000; }
+        
+        /* Активное оружие */
+        .w-item { opacity: 0.4; padding: 2px 5px; }
+        .w-item.active { color: #0f0; border-bottom: 2px solid #0f0; opacity: 1; font-weight: bold; }
+
+        #dash-bar { width: 100px; height: 5px; background: #222; margin-top: 5px; border: 1px solid #444; }
+        #dash-fill { width: 100%; height: 100%; background: #0af; transition: width 0.1s linear; }
+    </style>
+</head>
+<body oncontextmenu="return false;">
+    <div id="v-err"><h1>ACCESS DENIED</h1><p id="v-msg"></p></div>
+    
+    <div id="ui">
+        <div style="display: flex; justify-content: space-between;">
+            <div class="panel">HP: <span id="hp" style="color:#0f0">100</span>%</div>
+            <div class="panel" id="leaderboard">TOP</div>
+        </div>
+        <div id="logs" style="font-size: 11px; color: #666; max-height: 100px; overflow: hidden;"></div>
+        <div style="display: flex; justify-content: space-between; align-items: flex-end;">
+            <div class="panel">
+                Shift: DASH (5s)<br>
+                <div id="dash-bar"><div id="dash-fill"></div></div>
+            </div>
+            <div class="panel" style="text-align: right;">
+                <div id="ammo" style="font-size: 32px;">17</div>
+                <div style="font-size: 11px; display: flex; gap: 8px;">
+                    <span id="w_pistol" class="w-item">1:PIST</span> 
+                    <span id="w_shotgun" class="w-item">2:SHOT</span> 
+                    <span id="w_rifle" class="w-item">3:RIFL</span> 
+                    <span id="w_sniper" class="w-item">4:SNIP</span> 
+                    <span id="w_smg" class="w-item">5:SMG</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="importmap">
+        { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js", "socket.io-client": "https://cdn.socket.io/4.7.2/socket.io.esm.min.js" } }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { io } from 'socket.io-client';
+
+        // БЛОКИРОВКА F12
+        window.onkeydown = (e) => { if (e.keyCode == 123 || (e.ctrlKey && e.shiftKey && e.keyCode == 73)) return false; };
+
+        const nick = prompt("Ник:") || "Player";
+        const socket = io('http://x3.qwertyx.host:26213');
+        
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        scene.add(new THREE.AmbientLight(0xffffff, 1));
+        scene.add(new THREE.GridHelper(100, 50, 0x333333, 0x111111));
+
+        const playerMeshes = {}, bulletMeshes = [], obstacleMeshes = [], lootMeshes = [];
+        let keys = {}, lastDir = {x:0, z:-1}, myPos = {x:0, z:0};
+        
+        // ОРУЖИЕ
+        let curW = 'pistol';
+        let spacePressed = false;
+        let lastDash = 0;
+
+        // Конфиг (auto: true - зажим, false - клик)
+        const W_CONFIG = {
+            pistol:  { auto: false },
+            shotgun: { auto: false },
+            rifle:   { auto: true },
+            sniper:  { auto: false },
+            smg:     { auto: true }
+        };
+
+        socket.emit('join', { name: nick, version: "1.1" });
+        socket.on('version_error', m => { document.getElementById('v-err').style.display='block'; document.getElementById('v-msg').innerText=m; });
+        socket.on('log', m => { const l = document.getElementById('logs'); l.innerHTML = `<div>${m}</div>` + l.innerHTML; });
+
+        window.onkeydown = e => {
+            keys[e.code] = true;
+            
+            // Выбор оружия
+            const map = { Digit1:'pistol', Digit2:'shotgun', Digit3:'rifle', Digit4:'sniper', Digit5:'smg' };
+            if (map[e.code]) { 
+                curW = map[e.code]; 
+                updateUI(); 
+            }
+
+            // Стрельба (ОДИНОЧНЫЕ)
+            if (e.code === 'Space') {
+                spacePressed = true;
+                // Если оружие НЕ автоматическое, стреляем один раз при нажатии
+                if (!W_CONFIG[curW].auto) {
+                    socket.emit('shoot', curW);
+                }
+            }
+
+            // DASH
+            if (e.code === 'ShiftLeft' && Date.now() - lastDash > 5000) {
+                const tx = myPos.x + lastDir.x * 5;
+                const tz = myPos.z + lastDir.z * 5;
+                socket.emit('dash', { x: tx, z: tz });
+                myPos.x = tx; myPos.z = tz;
+                lastDash = Date.now();
+            }
+        };
+
+        window.onkeyup = e => {
+            keys[e.code] = false;
+            if (e.code === 'Space') spacePressed = false;
+        };
+
+        function updateUI() {
+            document.querySelectorAll('.w-item').forEach(el => el.className = 'w-item');
+            const el = document.getElementById('w_' + curW);
+            if(el) el.className = 'w-item active';
+        }
+        updateUI();
+
+        socket.on('state', data => {
+            const me = data.players[socket.id];
+            if(me) {
+                document.getElementById('hp').innerText = Math.floor(me.hp);
+                document.getElementById('ammo').innerText = me.reloading[curW] ? '...' : me.ammo[curW];
+                if(Math.hypot(myPos.x - me.x, myPos.z - me.z) > 1.5) { myPos.x = me.x; myPos.z = me.z; }
+            }
+
+            // Dash бар
+            let dProg = Math.min(100, ((Date.now() - lastDash) / 5000) * 100);
+            document.getElementById('dash-fill').style.width = dProg + '%';
+            document.getElementById('dash-fill').style.background = dProg>=100 ? '#0f0' : '#0af';
+
+            // Лидерборд
+            document.getElementById('leaderboard').innerHTML = Object.entries(data.leaderboard)
+                .sort((a,b)=>b[1]-a[1]).map(s=>`<div>${s[0]}: ${s[1]}</div>`).join('');
+
+            // Стены
+            if (obstacleMeshes.length === 0 && data.obstacles) {
+                data.obstacles.forEach(o => {
+                    const m = new THREE.Mesh(new THREE.BoxGeometry(o.w, 2, o.d), new THREE.MeshStandardMaterial({color: 0x555555}));
+                    m.position.set(o.x, 1, o.z); scene.add(m); obstacleMeshes.push(m);
+                });
+            }
+
+            // Лут
+            lootMeshes.forEach(m => scene.remove(m)); lootMeshes.length = 0;
+            data.loot.forEach(l => {
+                const m = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.6, 0.6), new THREE.MeshBasicMaterial({color: 0xffff00}));
+                m.position.set(l.x, 0.3, l.z);
+                m.rotation.y += Date.now() * 0.001;
+                scene.add(m); lootMeshes.push(m);
+            });
+
+            // Игроки
+            for(let id in data.players) {
+                let p = data.players[id];
+                if(!playerMeshes[id]) {
+                    playerMeshes[id] = new THREE.Mesh(new THREE.BoxGeometry(1,1,1), new THREE.MeshStandardMaterial({color: p.color}));
+                    scene.add(playerMeshes[id]);
+                }
+                playerMeshes[id].position.lerp(new THREE.Vector3(p.x, 0.5, p.z), 0.3);
+                playerMeshes[id].visible = p.isAlive;
+                if(id === socket.id) {
+                    camera.position.lerp(new THREE.Vector3(p.x, 15, p.z + 8), 0.1);
+                    camera.lookAt(p.x, 0, p.z);
+                }
+            }
+
+            // Пули
+            bulletMeshes.forEach(b => scene.remove(b)); bulletMeshes.length = 0;
+            data.bullets.forEach(b => {
+                const bm = new THREE.Mesh(new THREE.SphereGeometry(0.15), new THREE.MeshBasicMaterial({color: 0xffaa00}));
+                bm.position.set(b.x, 0.5, b.z); scene.add(bm); bulletMeshes.push(bm);
+            });
+        });
+
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            // Стрельба (АВТОМАТИЧЕСКАЯ)
+            if (spacePressed && W_CONFIG[curW].auto) {
+                socket.emit('shoot', curW);
+            }
+
+            const meMesh = playerMeshes[socket.id];
+            if(meMesh && meMesh.visible) {
+                let speed = 0.16;
+                let moved = false;
+                if(keys['KeyW']) { myPos.z -= speed; lastDir = {x:0, z:-1}; moved = true; }
+                if(keys['KeyS']) { myPos.z += speed; lastDir = {x:0, z:1}; moved = true; }
+                if(keys['KeyA']) { myPos.x -= speed; lastDir = {x:-1, z:0}; moved = true; }
+                if(keys['KeyD']) { myPos.x += speed; lastDir = {x:1, z:0}; moved = true; }
+                
+                if(moved) socket.emit('move', { x: myPos.x, z: myPos.z, lastDir });
+            }
+            renderer.render(scene, camera);
+        }
+        animate();
+    </script>
+</body>
+</html>
